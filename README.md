@@ -19,7 +19,18 @@
 ## 安裝
 
 ```bash
-pip install -r requirements.txt
+# 建議使用虛擬環境
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 安裝依賴
+pip install -e .
+```
+
+或使用 Makefile：
+
+```bash
+make setup
 ```
 
 ## 資料準備
@@ -77,16 +88,48 @@ python train.py
 ## 專案結構
 
 ```
-├── gpt2.py              # GPT-2 Medium 模型架構
-├── train.py             # 訓練腳本
-├── inference.py         # 文字生成
-├── dataloader.py        # 資料載入與 batching
-├── checkpoint.py        # 檢查點儲存/讀取
-├── prepare_data.py      # 資料預處理（tokenize + shard）
+├── gpt2.py                  # GPT-2 Medium 模型架構
+├── train.py                 # 訓練腳本
+├── inference.py             # 文字生成
+├── dataloader.py            # 資料載入與 batching
+├── checkpoint.py            # 檢查點儲存/讀取
+├── prepare_data.py          # 資料預處理（tokenize + shard）
 ├── download_fineweb_edu.py  # Chinese FineWeb-Edu 下載器
-├── download_wiki.py     # 中文 Wikipedia 下載器
-└── run_prepare.sh       # 一鍵執行資料準備
+├── download_wiki.py         # 中文 Wikipedia 下載器
+├── run_prepare.sh           # 一鍵執行資料準備
+├── pyproject.toml           # 專案中繼資料與依賴
+├── Makefile                 # 常用指令自動化
+└── CONTRIBUTING.md          # 協作開發指南
 ```
+
+## 協作開發
+
+本專案歡迎所有人參與！詳細的協作流程請見 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+### 快速開始
+
+```bash
+git clone https://github.com/andrewcodehappily/LLM-AI.git
+cd LLM-AI
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### 常用指令
+
+```bash
+make download-all      # 下載所有資料
+make prepare-data      # 預處理資料
+make train             # 開始訓練
+make clean-all         # 清理所有生成檔案
+```
+
+### 注意事項
+
+- **僅支援 Apple Silicon Mac**（MLX 框架依賴）
+- **不要提交大檔案**（資料、checkpoint、.venv 等已列入 `.gitignore`）
+- 所有變更請透過 Pull Request 提交
 
 ## 授權
 

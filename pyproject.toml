@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "gpt2-mlx-chinese"
+version = "0.1.0"
+description = "GPT-2 Medium 中文語言模型 — 使用 Apple MLX 框架"
+readme = "README.md"
+license = { text = "MIT" }
+
+authors = [
+    { name = "andrewcodehappily" },
+]
+
+requires-python = ">=3.12"
+
+dependencies = [
+    "mlx>=0.20",
+    "mlx-lm>=0.20",
+    "transformers>=4.40",
+    "numpy>=1.26",
+    "tiktoken>=0.7",
+    "tqdm>=4.66",
+    "requests>=2.31",
+]
+
+[project.urls]
+Repository = "https://github.com/andrewcodehappily/LLM-AI"
+
+[tool.setuptools.packages.find]
+include = ["gpt2*"]
