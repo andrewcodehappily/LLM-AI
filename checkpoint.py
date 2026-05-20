@@ -94,4 +94,16 @@ def load_checkpoint(model, optimizer, checkpoint_dir, data_loader=None):
             )
 
     logger.info(f"Resumed training from checkpoint at step {step} ({checkpoint_path})")
+
+    if data_loader_state:
+        data_shard = data_loader_state["shard"]
+        data_position = data_loader_state["position"]
+        print(
+            f"\n══ 從 checkpoint 恢復 ══ step {step} | "
+            f"shard {data_shard}/{len(data_loader.shards)-1} | "
+            f"position {data_position} ══\n"
+        )
+    else:
+        print(f"\n══ 從 checkpoint 恢復 ══ step {step} ══\n")
+
     return step + 1, data_loader_state  # Return next step to start from

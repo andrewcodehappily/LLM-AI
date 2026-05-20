@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+*.egg-info/
+
+# Data files (too large)
+edu_fineweb10B/
+*.npy
+*.npz
+input*.txt
+input*.txt.bak
+*.parquet
+
+# Checkpoints & logs
+checkpoints/
+logs.txt
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# MLX
+*.safetensors

@@ -7,8 +7,8 @@ from functools import partial
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-import tiktoken
 from mlx.optimizers.optimizers import clip_grad_norm
+from transformers import AutoTokenizer
 from mlx.utils import tree_map
 
 from checkpoint import load_checkpoint, save_checkpoint
@@ -33,18 +33,20 @@ model = GPT(GPTConfig(vocab_size=VOCAB_SIZE))
 # Initialize model parameters (MLX is lazy by default)
 mx.eval(model.parameters())
 
-enc = tiktoken.get_encoding("gpt2")
+enc = AutoTokenizer.from_pretrained(
+    "Qwen/Qwen2.5-7B", trust_remote_code=True
+)
 
 # Similar to autocast in PyTorch, we convert the model to bfloat16 for faster training
 model.apply(lambda x: x.astype(mx.bfloat16))
 
-train_loader = DataLoaderLite(B=16, T=1024, split="train")
-val_loader = DataLoaderLite(B=16, T=1024, split="val")
+train_loader = DataLoaderLite(B=8, T=1024, split="train")
+val_loader = DataLoaderLite(B=8, T=1024, split="val")
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
-max_steps = 19073
+max_steps = 13542  # Chinchilla optimal: 355M*20=7.1B tokens @ 524k/step
 linear_schedule = optim.linear_schedule(max_lr * 1 / warmup_steps, max_lr, warmup_steps)
 cosine_schedule = optim.cosine_decay(max_lr, max_steps - warmup_steps, min_lr)
 lr_schedule = optim.join_schedules([linear_schedule, cosine_schedule], [warmup_steps])
@@ -97,7 +99,7 @@ start_step, _ = load_checkpoint(
 )
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
-B = 32  # micro-batch size
+B = 8  # micro-batch size
 T = 1024  # sequence length
 assert total_batch_size % (B * T) == 0, (
     "make sure total_batch_size is divisible by B * T"
@@ -190,6 +192,7 @@ for i in range(start_step, max_steps):
         save_checkpoint(model, optimizer, i, checkpoint_dir, data_loader=train_loader)
 
     if i > 0 and i % 100 == 0 or i == max_steps - 1:
+        print()  # 換行區隔 validation log
         val_loader.reset()
         val_loss_accum = 0.0
         val_batches = 10
@@ -200,9 +203,10 @@ for i in range(start_step, max_steps):
             val_loss_accum += float(val_loss)
         val_loss_avg = val_loss_accum / val_batches
         logger.info(f"step {i}: validation loss {val_loss_avg}")
+        print(f"  validation loss {val_loss_avg:.4f}")
 
         num_return_sequences = 3
-        tokens = enc.encode("On a remote island, ")
+        tokens = enc.encode("在一座遙遠的島嶼上，")
         tokens = mx.array(tokens, dtype=mx.int32)
         tokens = mx.tile(mx.expand_dims(tokens, axis=0), (num_return_sequences, 1))
         logger.info(
@@ -227,7 +231,22 @@ for i in range(start_step, max_steps):
         f"step {i}: loss {loss_val}, grad_norm {grad_norm_val:.6f}, lr {current_lr:.2e}, dt {dt:.2f}ms, tok/sec {tokens_per_sec:.2f}"
     )
 
-tokens = enc.encode("Once upon a time")
+    # 終端機即時顯示訓練進度
+    elapsed = i - start_step
+    total = max_steps - start_step
+    pct = elapsed / total * 100 if total > 0 else 0
+    eta_sec = (total - elapsed) * (dt / 1000)
+    eta_h = eta_sec // 3600
+    eta_m = (eta_sec % 3600) // 60
+    print(
+        f"\rstep {i:>5}/{max_steps} | loss {loss_val:<8.4f} | lr {current_lr:.2e} | "
+        f"tok/s {tokens_per_sec:>6.0f} | dt {dt/1000:>5.1f}s | "
+        f"grad_norm {grad_norm_val:<6.2f} | "
+        f"ETA {eta_h:.0f}h{eta_m:.0f}m | {pct:.1f}%",
+        end="", flush=True,
+    )
+
+tokens = enc.encode("從前從前，")
 tokens = mx.array(tokens, dtype=mx.int32)
 output = generate_text(
     model,
