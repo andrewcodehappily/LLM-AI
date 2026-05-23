@@ -39,7 +39,7 @@ def generate_text(model, prompt, max_new_tokens=100, temperature=1.0, top_k=None
 
     output_texts = []
     for i in range(input_ids.shape[0]):
-        output_ids = input_ids[i].tolist()
+        output_ids = mx.asnumpy(input_ids[i]).tolist()
         output_text = enc.decode(output_ids)
         output_texts.append(output_text)
 

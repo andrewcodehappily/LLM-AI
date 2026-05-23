@@ -1,26 +1,26 @@
 """將 input{1..N}.txt 合併轉換為 DataLoaderLite 可讀取的 .npy shard 格式。
-使用 chunk 方式處理大檔案，避免 Python int list 吃爆記憶體。"""
-import os
-import re
-import math
-import logging
+
+支援增量模式：已 tokenize 過的檔案會自動跳過，只處理新檔案。
+用法: python3 prepare_data.py                # 增量模式，單進程
+      python3 prepare_data.py --jobs 4        # 增量模式，4 進程 parallel
+      python3 prepare_data.py --force --jobs 4  # 全部重來 + 多進程
+"""
+import os, re, math, logging, time, sys
+import argparse
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 from transformers import AutoTokenizer
-from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger("prepare_data")
 
 data_root = "edu_fineweb10B"
 shard_size = 1_000_000
 val_ratio = 0.01
-CHUNK_SIZE = 10_000_000  # 每次讀取 10MB 文字，控制 token list 大小
-
-os.makedirs(data_root, exist_ok=True)
-enc = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", trust_remote_code=True)
+CHUNK_SIZE = 10_000_000
+temp_dir = os.path.join(data_root, "_temp")
 
 
 def find_input_files():
@@ -32,82 +32,176 @@ def find_input_files():
             files.append((int(m.group(1)), fname))
     files.sort(key=lambda x: x[0])
     if not files:
-        raise FileNotFoundError("找不到 input1.txt, input2.txt, ... 任何 inputX.txt")
-    logger.info(f"找到 {len(files)} 個輸入檔: {', '.join(f[1] for f in files)}")
+        raise FileNotFoundError("找不到 input1.txt, input2.txt, ...")
+    logger.info(f"找到 {len(files)} 個輸入檔")
     return [f for _, f in files]
 
 
-input_files = find_input_files()
+def get_existing_token_counts(temp_dir, input_files):
+    """回傳 {fname: token_count} 已存在 temp .npy 的檔案。"""
+    existing = {}
+    if not os.path.exists(temp_dir):
+        return existing
+    for fname in input_files:
+        npy_path = os.path.join(temp_dir, f"{fname}.npy")
+        if os.path.exists(npy_path):
+            arr = np.load(npy_path)
+            existing[fname] = len(arr)
+            del arr
+    return existing
 
-# 估算總 token 數（取前 1000 行）
-logger.info("估算 token 總數...")
-total_estimated = 0
-for fname in input_files:
-    sample_lines = []
-    with open(fname, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if i >= 1000:
-                break
-            sample_lines.append(line)
-    sample_text = "".join(sample_lines)
-    sample_tokens = enc.encode(sample_text)
-    tokens_per_char = len(sample_tokens) / max(len(sample_text), 1)
-    file_size = os.path.getsize(fname)
-    estimated = int(tokens_per_char * file_size)
-    total_estimated += estimated
-    logger.info(f"  {fname}: ~{estimated / 1e6:.1f}M tokens")
 
-logger.info(f"估計總 token 數: ~{total_estimated / 1e6:.1f}M")
-
-# 用 chunk 方式處理每個檔案，避免 Python list 累積到爆記憶體
-# 每個 chunk 的 token list 用完就轉 numpy，不保留巨量 Python ints
-logger.info("開始讀取並 tokenize 所有檔案（chunk 模式）...")
-file_arrays = []  # 存每個檔案的 numpy array
-
-for fname in input_files:
-    logger.info(f"  讀取 {fname}...")
+def tokenize_one(fname, enc, chunk_callback=False):
+    """單一檔案 tokenize → 存暫存 .npy，回傳 (fname, token_count)。"""
     chunk_arrays = []
+    chunk_i = 0
     with open(fname, "r", encoding="utf-8") as f:
         while True:
             chunk = f.read(CHUNK_SIZE)
             if not chunk:
                 break
+            t0 = time.time()
             tokens = enc.encode(chunk)
             chunk_arrays.append(np.array(tokens, dtype=np.int32))
-
-    if chunk_arrays:
-        combined = np.concatenate(chunk_arrays)
-        file_arrays.append(combined)
-        logger.info(f"  {fname}: {len(combined):,} tokens")
-
-# 合併所有檔案
-tokens = np.concatenate(file_arrays) if file_arrays else np.array([], dtype=np.int32)
-del file_arrays  # 釋放各檔案的陣列
-logger.info(f"總 token 數: {len(tokens):,}")
-
-# 分割 train/val
-val_cutoff = int(len(tokens) * val_ratio)
-val_tokens = tokens[:val_cutoff]
-train_tokens = tokens[val_cutoff:]
-logger.info(f"train tokens: {len(train_tokens):,}, val tokens: {len(val_tokens):,}")
+            dt = time.time() - t0
+            chunk_i += 1
+            if chunk_callback and chunk_i % 10 == 0:
+                logger.info(f"    chunk {chunk_i}: {len(tokens):,} tokens in {dt:.2f}s")
+                sys.stdout.flush()
+    combined = np.concatenate(chunk_arrays)
+    out_path = os.path.join(temp_dir, f"{fname}.npy")
+    np.save(out_path, combined)
+    return fname, len(combined)
 
 
-def save_shards(tokens_arr, prefix):
-    n_shards = math.ceil(len(tokens_arr) / shard_size)
-    for i in range(n_shards):
-        start = i * shard_size
-        end = min(start + shard_size, len(tokens_arr))
-        shard = tokens_arr[start:end].astype(np.int32)
-        filename = os.path.join(data_root, f"{prefix}_{i:02d}.npy")
+def tokenize_worker(fname):
+    """給 multiprocessing 用的 worker：獨立載入 tokenizer，處理一個檔案。"""
+    # 每個 worker 有自己的 logger
+    worker_logger = logging.getLogger(f"worker-{fname}")
+    enc = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", trust_remote_code=True)
+    t0 = time.time()
+    _fname, n_tokens = tokenize_one(fname, enc)
+    dt = time.time() - t0
+    size_mb = os.path.getsize(fname) / (1024 * 1024)
+    tok_speed = n_tokens / dt
+    return fname, n_tokens, size_mb, dt, tok_speed
+
+
+def build_shards(prefix, range_start, range_end, input_files, cum_offsets, out_dir):
+    """從 temp .npy 讀取 token 區間，組 shard 到 out_dir。"""
+    n_shards = math.ceil((range_end - range_start) / shard_size)
+    for si in range(n_shards):
+        shard_start = range_start + si * shard_size
+        shard_end = min(range_start + (si + 1) * shard_size, range_end)
+
+        pieces = []
+        for fi, fname in enumerate(input_files):
+            f_start = cum_offsets[fi]
+            f_end = cum_offsets[fi + 1]
+            overlap_start = max(shard_start, f_start)
+            overlap_end = min(shard_end, f_end)
+
+            if overlap_start < overlap_end:
+                local_start = overlap_start - f_start
+                local_end = overlap_end - f_start
+                arr = np.load(os.path.join(temp_dir, f"{fname}.npy"))
+                pieces.append(arr[local_start:local_end])
+                del arr
+
+        shard = np.concatenate(pieces)
+        filename = os.path.join(out_dir, f"{prefix}_{si:04d}.npy")
         np.save(filename, shard)
-        logger.info(f"  saved {filename} — shape {shard.shape}")
+    logger.info(f"  {prefix}: {n_shards} shards done")
 
 
-logger.info("儲存 val shards...")
-save_shards(val_tokens, "val")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true", help="強制全部重新 tokenize")
+    parser.add_argument("--jobs", type=int, default=1, help="平行 tokenize 的 worker 數（預設 1，M4 Max 建議 2~4）")
+    args = parser.parse_args()
 
-logger.info("儲存 train shards...")
-save_shards(train_tokens, "train")
+    os.makedirs(temp_dir, exist_ok=True)
+    input_files = find_input_files()
 
-n_files = len([f for f in os.listdir(data_root) if f.endswith(".npy")])
-logger.info(f"完成！共 {n_files} 個 shard 檔案寫入 {data_root}/")
+    # === 載入 tokenizer（只一次） ===
+    logger.info("載入 Qwen tokenizer...")
+    t0 = time.time()
+    enc = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B", trust_remote_code=True)
+    logger.info(f"tokenizer 載入耗時 {time.time()-t0:.1f}s")
+
+    # === 檢查哪些已存在，只處理新檔案 ===
+    existing_counts = get_existing_token_counts(temp_dir, input_files)
+    if args.force:
+        logger.info("--force 模式：全部重新 tokenize")
+        existing_counts = {}
+
+    logger.info(f"開始 tokenize（已有 {len(existing_counts)} 個檔案快取）...")
+
+    # 找出需要 tokenize 的檔案
+    new_files = [f for f in input_files if f not in existing_counts]
+
+    file_lengths = []
+    if new_files and args.jobs > 1:
+        # === 多進程模式 ===
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        logger.info(f"多進程模式：{args.jobs} workers 平行處理 {len(new_files)} 個檔案")
+        with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+            futures = {executor.submit(tokenize_worker, f): f for f in new_files}
+            for future in as_completed(futures):
+                fname, n_tokens, size_mb, dt, tok_speed = future.result()
+                logger.info(f"  {fname} ({size_mb:.0f}MB) -> {n_tokens:,} tokens in {dt:.0f}s ({tok_speed:,.0f} tok/s)")
+                file_lengths.append((fname, n_tokens))
+        # 保持跟 input_files 順序一致
+        file_lengths.sort(key=lambda x: input_files.index(x[0]))
+        file_lengths = [n for _, n in file_lengths]
+    else:
+        # === 單進程模式（原本的順序 tokenize） ===
+        for fname in input_files:
+            if fname in existing_counts:
+                n_tokens = existing_counts[fname]
+                logger.info(f"  {fname}: 已存在，跳過 ({n_tokens:,} tokens)")
+                file_lengths.append(n_tokens)
+                continue
+
+            t0 = time.time()
+            size_mb = os.path.getsize(fname) / (1024 * 1024)
+            _fname, n_tokens = tokenize_one(fname, enc, chunk_callback=True)
+            dt = time.time() - t0
+            tok_speed = n_tokens / dt
+            logger.info(f"  {fname} ({size_mb:.0f}MB) -> {n_tokens:,} tokens in {dt:.0f}s ({tok_speed:,.0f} tok/s)")
+            file_lengths.append(n_tokens)
+
+    total_tokens = sum(file_lengths)
+    logger.info(f"總 token 數: {total_tokens:,}")
+
+    # 累計 offset
+    cum_offsets = [0]
+    for fl in file_lengths:
+        cum_offsets.append(cum_offsets[-1] + fl)
+
+    val_cutoff = int(total_tokens * val_ratio)
+    logger.info(f"train tokens: {total_tokens - val_cutoff:,}, val tokens: {val_cutoff:,}")
+
+    # === 安全組 shard：先寫到新目錄，全部完成再覆蓋 ===
+    new_dir = os.path.join(data_root, "_new")
+    os.makedirs(new_dir, exist_ok=True)
+
+    logger.info("儲存 val shards...")
+    build_shards("val", 0, val_cutoff, input_files, cum_offsets, new_dir)
+
+    logger.info("儲存 train shards...")
+    build_shards("train", val_cutoff, total_tokens, input_files, cum_offsets, new_dir)
+
+    # 全部寫完確認無誤 → 刪舊 shard → 搬新 shard
+    old_shards = [f for f in os.listdir(data_root) if f.endswith(".npy") and not f.startswith("_")]
+    for f in old_shards:
+        os.remove(os.path.join(data_root, f))
+    logger.info(f"已刪除 {len(old_shards)} 個舊 shard")
+
+    for f in os.listdir(new_dir):
+        os.rename(os.path.join(new_dir, f), os.path.join(data_root, f))
+    os.rmdir(new_dir)
+
+    n_files = len([f for f in os.listdir(data_root) if f.endswith(".npy")])
+    logger.info(f"完成！共 {n_files} 個 shard 寫入 {data_root}/")
+    logger.info(f"（暫存檔保留在 {temp_dir}/，下次加新資料會自動跳過已處理的檔案）")

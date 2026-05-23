@@ -46,7 +46,7 @@ val_loader = DataLoaderLite(B=8, T=1024, split="val")
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
-max_steps = 13542  # Chinchilla optimal: 355M*20=7.1B tokens @ 524k/step
+max_steps = 13179  # ~6.98B tokens total, 6.91B train @ 524k/step
 linear_schedule = optim.linear_schedule(max_lr * 1 / warmup_steps, max_lr, warmup_steps)
 cosine_schedule = optim.cosine_decay(max_lr, max_steps - warmup_steps, min_lr)
 lr_schedule = optim.join_schedules([linear_schedule, cosine_schedule], [warmup_steps])
