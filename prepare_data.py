@@ -69,6 +69,8 @@ def tokenize_one(fname, enc, chunk_callback=False):
                 logger.info(f"    chunk {chunk_i}: {len(tokens):,} tokens in {dt:.2f}s")
                 sys.stdout.flush()
     combined = np.concatenate(chunk_arrays)
+    # Append document separator (Qwen <|endoftext|> = 151643)
+    combined = np.append(combined, enc.eos_token_id)
     out_path = os.path.join(temp_dir, f"{fname}.npy")
     np.save(out_path, combined)
     return fname, len(combined)

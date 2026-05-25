@@ -40,8 +40,8 @@ enc = AutoTokenizer.from_pretrained(
 # Similar to autocast in PyTorch, we convert the model to bfloat16 for faster training
 model.apply(lambda x: x.astype(mx.bfloat16))
 
-train_loader = DataLoaderLite(B=8, T=1024, split="train")
-val_loader = DataLoaderLite(B=8, T=1024, split="val")
+train_loader = DataLoaderLite(B=4, T=2048, split="train")
+val_loader = DataLoaderLite(B=4, T=2048, split="val")
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
@@ -99,8 +99,8 @@ start_step, _ = load_checkpoint(
 )
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
-B = 8  # micro-batch size
-T = 1024  # sequence length
+B = 4  # micro-batch size
+T = 2048  # sequence length
 assert total_batch_size % (B * T) == 0, (
     "make sure total_batch_size is divisible by B * T"
 )
@@ -215,9 +215,6 @@ for i in range(start_step, max_steps):
 
     # Unlike in PyTorch, no need for zero_grad() in MLX.
     loss, grad_norm = step()
-    # Evaluate model parameters after compiled function returns
-    # This ensures optimizer updates are materialized and helps with memory management
-    mx.eval(model.parameters())
     t1 = time.time()
     dt = (t1 - t0) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)

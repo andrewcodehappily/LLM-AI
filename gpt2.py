@@ -5,6 +5,25 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
+def precompute_rope_freqs(dim, end, theta=10000.0):
+    freqs = 1.0 / (theta ** (mx.arange(0, dim, 2, dtype=mx.float32) / dim))
+    t = mx.arange(end, dtype=mx.float32)
+    freqs = mx.outer(t, freqs)
+    return mx.cos(freqs.astype(mx.bfloat16)), mx.sin(freqs.astype(mx.bfloat16))
+
+
+def apply_rope(q, k, cos, sin):
+    half_dim = q.shape[-1] // 2
+    q1, q2 = q[..., :half_dim], q[..., half_dim:]
+    k1, k2 = k[..., :half_dim], k[..., half_dim:]
+    T = q.shape[2]
+    c = mx.expand_dims(cos[:T], (0, 1))
+    s = mx.expand_dims(sin[:T], (0, 1))
+    q_out = mx.concatenate([q1 * c - q2 * s, q2 * c + q1 * s], axis=-1)
+    k_out = mx.concatenate([k1 * c - k2 * s, k2 * c + k1 * s], axis=-1)
+    return q_out, k_out
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -27,6 +46,13 @@ class CausalSelfAttention(nn.Module):
         # Freeze the mask so it's not included in gradient computation
         self._no_grad.add("mask")
 
+        # Precompute RoPE frequencies (frozen, not trainable)
+        cos, sin = precompute_rope_freqs(self.head_size, config.block_size)
+        self.cos = cos
+        self.sin = sin
+        self._no_grad.add("cos")
+        self._no_grad.add("sin")
+
     def __call__(self, x):
         B, T, C = x.shape
         qkv = self.c_attn(x)
@@ -37,6 +63,9 @@ class CausalSelfAttention(nn.Module):
         k = k.reshape(B, T, self.n_heads, self.head_size).transpose(0, 2, 1, 3)
         q = q.reshape(B, T, self.n_heads, self.head_size).transpose(0, 2, 1, 3)
         v = v.reshape(B, T, self.n_heads, self.head_size).transpose(0, 2, 1, 3)
+
+        # Apply RoPE to q and k
+        q, k = apply_rope(q, k, self.cos, self.sin)
 
         # Explicit attention computation
         # attn_scores = (q @ k.transpose(0, 1, 3, 2)) / mx.sqrt(
@@ -103,7 +132,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 2048
     vocab_size: int = 151680
     n_layers: int = 24
     n_heads: int = 16
@@ -117,7 +146,6 @@ class GPT(nn.Module):
 
         self.transformer = {
             "wte": nn.Embedding(config.vocab_size, config.n_embed),
-            "wpe": nn.Embedding(config.block_size, config.n_embed),
             "h": [Block(config) for _ in range(config.n_layers)],
             "ln_f": nn.LayerNorm(config.n_embed),
         }
@@ -162,12 +190,8 @@ class GPT(nn.Module):
             "Cannot forward, model block size is exhausted."
         )
 
-        # Token and position embeddings
-        token_embeddings = self.transformer["wte"](idx)  # (B, T, n_embed)
-        position_ids = mx.arange(0, T, dtype=mx.int32).reshape(1, T)
-        position_embeddings = self.transformer["wpe"](position_ids)  # (1, T, n_embed)
-
-        x = token_embeddings + position_embeddings  # (B, T, n_embed)
+        # Token embeddings only (RoPE handles position in attention)
+        x = self.transformer["wte"](idx)  # (B, T, n_embed)
 
         # Transformer blocks
         for block in self.transformer["h"]:
