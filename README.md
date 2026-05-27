@@ -6,7 +6,7 @@
 
 - **GPT-2 Medium 架構（355M 參數）：** 24 層 Transformer、16 注意力頭、1024 維度
 - **Qwen 2.5 Tokenizer（151,680 vocab）：** 中文壓縮效率是 GPT-2 tokenizer 的 3-4 倍，實際 context window 達 ~2000 字
-- **中文高品質資料訓練：** Chinese Wikipedia + Chinese FineWeb-Edu，共 32.3 億 tokens
+- **中文高品質資料訓練：** Chinese Wikipedia + Chinese FineWeb-Edu + MNBVC（知乎/ChatGPT/論壇），共 69.1 億 tokens
 - **Chinchilla 最優訓練：** 355M × 20 = 71 億 tokens 訓練目標，梯度累積 64 步
 - **MLX + Apple Silicon 優化：** 支援 `mx.compile` 前向/反向傳播編譯、bf16 混合精度
 
@@ -51,13 +51,23 @@ python download_wiki.py
 python download_fineweb_edu.py --num-files 10
 ```
 
-### 3. 合併並轉換為 shard
+### 3. MNBVC 補充資料（可選）
+
+從 HuggingFace [`liwu/MNBVC`](https://huggingface.co/datasets/liwu/MNBVC) 下載知乎問答、ChatGPT 百度知道、糗事百科：
 
 ```bash
-python prepare_data.py
+python download_additional_data.py
 ```
 
-這會將所有 `inputX.txt` 合併，用 Qwen 2.5 tokenizer 編碼，並輸出至 `edu_fineweb10B/` 目錄（每個 shard 100 萬 tokens）。
+支援 `--categories zhihu chatgpt forum` 選擇性下載，`--force` 重新下載。
+
+### 4. 合併並轉換為 shard
+
+```bash
+python prepare_data.py --jobs 4
+```
+
+支援增量模式：已 tokenize 的檔案自動跳過。`--jobs` 啟用多進程加速。輸出至 `edu_fineweb10B/` 目錄（每個 shard 100 萬 tokens）。
 
 ## 訓練
 
@@ -70,14 +80,14 @@ python train.py
 | 參數 | 數值 |
 |------|------|
 | 模型參數量 | 355M |
-| Batch size (B) | 8 |
-| 序列長度 (T) | 1024 |
+| Batch size (B) | 4 |
+| 序列長度 (T) | 2048 |
 | 總 batch size (tokens) | 524,288 |
 | 梯度累積步數 | 64 |
 | 最大學習率 | 6e-4 |
-| 最小學習率 | 6e-5 |
+| 最小學習率 | 6e-5（max_lr × 0.1） |
 | Warmup 步數 | 715 |
-| 最大步數 | 13,542 |
+| 最大步數 | 13,179 |
 | 權重衰減 | 0.01 |
 | AdamW betas | (0.9, 0.95) |
 | 梯度裁剪 | 1.0 |
@@ -88,18 +98,21 @@ python train.py
 ## 專案結構
 
 ```
-├── gpt2.py                  # GPT-2 Medium 模型架構
-├── train.py                 # 訓練腳本
-├── inference.py             # 文字生成
-├── dataloader.py            # 資料載入與 batching
-├── checkpoint.py            # 檢查點儲存/讀取
-├── prepare_data.py          # 資料預處理（tokenize + shard）
-├── download_fineweb_edu.py  # Chinese FineWeb-Edu 下載器
-├── download_wiki.py         # 中文 Wikipedia 下載器
-├── run_prepare.sh           # 一鍵執行資料準備
-├── pyproject.toml           # 專案中繼資料與依賴
-├── Makefile                 # 常用指令自動化
-└── CONTRIBUTING.md          # 協作開發指南
+├── gpt2.py                      # GPT-2 Medium 模型架構
+├── train.py                     # 訓練腳本
+├── inference.py                 # 文字生成
+├── dataloader.py                # 資料載入與 batching
+├── checkpoint.py                # 檢查點儲存/讀取
+├── prepare_data.py              # 資料預處理（tokenize + shard）
+├── download_fineweb_edu.py      # Chinese FineWeb-Edu 下載器
+├── download_wiki.py             # 中文 Wikipedia 下載器
+├── download_additional_data.py  # MNBVC 補充資料下載器
+├── auto_train.sh                # 一鍵重跑全部（retokenize + 備份 + 訓練）
+├── test_generate.py             # 生成測試腳本
+├── run_prepare.sh               # 一鍵執行資料準備
+├── pyproject.toml               # 專案中繼資料與依賴
+├── Makefile                     # 常用指令自動化
+└── CONTRIBUTING.md              # 協作開發指南
 ```
 
 ## 協作開發

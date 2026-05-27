@@ -22,18 +22,21 @@ def generate_text(model, prompt, max_new_tokens=100, temperature=1.0, top_k=None
     initial_length = input_ids.shape[1]
 
     while input_ids.shape[1] < max_new_tokens + initial_length:
-        logits = model(input_ids)
-        logits = logits[:, -1, :] / temperature
+        logits = model(input_ids)[:, -1, :VOCAB_SIZE]
 
-        logits = logits[:, :VOCAB_SIZE]
+        if temperature == 0:
+            # Greedy decoding: pick the most likely token
+            next_token = mx.argmax(logits, axis=-1, keepdims=True)
+        else:
+            logits = logits / temperature
 
-        if top_k is not None:
-            top_k_values = mx.topk(logits, k=top_k, axis=-1)
-            min_top_k = top_k_values[:, -1].reshape(-1, 1)
-            logits = mx.where(logits < min_top_k, mx.array(float("-inf")), logits)
+            if top_k is not None:
+                top_k_values = mx.topk(logits, k=top_k, axis=-1)
+                min_top_k = top_k_values[:, -1].reshape(-1, 1)
+                logits = mx.where(logits < min_top_k, mx.array(float("-inf")), logits)
 
-        probs = mx.softmax(logits, axis=-1)
-        next_token = mx.random.categorical(probs, num_samples=1)
+            probs = mx.softmax(logits, axis=-1)
+            next_token = mx.random.categorical(probs, num_samples=1)
 
         input_ids = mx.concat([input_ids, next_token], axis=1)
 

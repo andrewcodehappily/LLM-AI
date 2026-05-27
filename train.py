@@ -1,8 +1,12 @@
+import gc
 import logging
 import math
 import os
 import time
-from functools import partial
+
+# 限制 MLX 最大記憶體用量（24GB，約 64GB 的 37%），防止 macOS 過度 swap
+os.environ.setdefault("MLX_METAL_MEMORY_LIMIT", str(24 * 1024**3))
+os.environ.setdefault("MLX_METAL_CACHE_MAX", str(4 * 1024**3))  # GPU cache 上限 4GB
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -40,8 +44,8 @@ enc = AutoTokenizer.from_pretrained(
 # Similar to autocast in PyTorch, we convert the model to bfloat16 for faster training
 model.apply(lambda x: x.astype(mx.bfloat16))
 
-train_loader = DataLoaderLite(B=4, T=2048, split="train")
-val_loader = DataLoaderLite(B=4, T=2048, split="val")
+train_loader = DataLoaderLite(B=2, T=2048, split="train")
+val_loader = DataLoaderLite(B=2, T=2048, split="val")
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
@@ -99,7 +103,7 @@ start_step, _ = load_checkpoint(
 )
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
-B = 4  # micro-batch size
+B = 2  # micro-batch size
 T = 2048  # sequence length
 assert total_batch_size % (B * T) == 0, (
     "make sure total_batch_size is divisible by B * T"
@@ -121,22 +125,12 @@ def loss_fn(model, x, y):
     return nn.losses.cross_entropy(logits, y, reduction="mean")
 
 
-# See https://github.com/ml-explore/mlx-examples/blob/main/transformer_lm/main.py for an example of using mx.compile with optimizers
-# I observed marginal improvements on M3 Max to training efficiency. token/sec went from 10k to 11.5k
-# GPU was already close to full utilization
-state = [model.state, optimizer.state]
-
-
 # Create loss_and_grad_fn once outside the loop to avoid recreating it
 loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
 
 
-# Compile only the forward/backward pass, not the gradient accumulation loop
-# This allows me to use mx.eval() during accumulation to free computation graphs
-# otherwise memory will be quickly exhausted causing the machine to crash
-@partial(mx.compile, inputs=state, outputs=state)
 def forward_backward(x, y):
-    """Compiled forward and backward pass for a single micro-batch."""
+    """Forward and backward pass for a single micro-batch."""
     loss, grads = loss_and_grad_fn(model, x, y)
     return loss, grads
 
@@ -146,13 +140,17 @@ def step():
     loss_accum = 0.0
     grads_accum = None
 
-    for _ in range(grad_accum_steps):
+    for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         loss, grads = forward_backward(x, y)
 
         # Evaluate loss and gradients immediately to materialize them and free computation graph
         # This is critical for memory management during gradient accumulation
         mx.eval(loss, grads)
+
+        # Clear Metal cache every 16 micro-steps to keep peak memory down
+        if micro_step > 0 and micro_step % 16 == 0 and mx.metal.is_available():
+            mx.metal.clear_cache()
 
         # Accumulate gradients
         if grads_accum is None:
@@ -180,6 +178,10 @@ def step():
     # based on the filter function (weight decay for ndim >= 2, no decay for ndim < 2)
     optimizer.update(model, clipped_grads)
     mx.eval(model.parameters())
+    # Clear MLX memory cache and Python GC periodically to prevent memory buildup
+    if mx.metal.is_available():
+        mx.metal.clear_cache()
+    gc.collect()
     return loss_accum, grad_norm
 
 
@@ -187,8 +189,8 @@ for i in range(start_step, max_steps):
     # Run 'sudo asitop' to monitor CPU usage
     t0 = time.time()
 
-    # Save checkpoint periodically (every 1000 steps) and at validation steps (every 100 steps)
-    if i > 0 and (i % 1000 == 0 or (i % 100 == 0 and i % 1000 != 0)):
+    # Save checkpoint every 50 steps
+    if i > 0 and i % 50 == 0:
         save_checkpoint(model, optimizer, i, checkpoint_dir, data_loader=train_loader)
 
     if i > 0 and i % 100 == 0 or i == max_steps - 1:
